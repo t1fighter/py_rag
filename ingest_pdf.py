@@ -2,10 +2,11 @@
 # Created by AI: Claude Sonnet 3.7 Thinking
 # Tuned / Debugged by t1fighter@github
 """
-PDF to Qdrant Vector Database Ingestion
----------------------------------------
-This script loads a PDF file from disk, processes it using LlamaIndex,
-and stores the embedded chunks in a Qdrant vector database.
+PDF Directory to Qdrant Vector Database Ingestion
+------------------------------------------------
+This script recursively loads all PDF files from a directory,
+processes them using LlamaIndex, and stores the embedded 
+chunks in a Qdrant vector database.
 Uses a vLLM instance via OpenAI-compatible API for embeddings.
 """
 
@@ -41,6 +42,29 @@ except ImportError:
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def find_pdf_files(directory_path: str) -> List[str]:
+    """
+    Recursively find all PDF files in a directory.
+    
+    Args:
+        directory_path: Path to the directory to search
+        
+    Returns:
+        List of paths to PDF files
+    """
+    if not os.path.exists(directory_path):
+        raise FileNotFoundError(f"Directory not found: {directory_path}")
+    
+    pdf_files = []
+    
+    for root, _, files in os.walk(directory_path):
+        for file in files:
+            if file.lower().endswith('.pdf'):
+                pdf_files.append(os.path.join(root, file))
+    
+    logger.info(f"Found {len(pdf_files)} PDF files in {directory_path}")
+    return pdf_files
 
 def load_pdf(pdf_path: str) -> List[Document]:
     """
@@ -85,8 +109,8 @@ def setup_qdrant(collection_name: str, host: str = "localhost", port: int = 6333
     
     return vector_store
 
-def ingest_pdf_to_qdrant(
-    pdf_path: str,
+def ingest_pdfs_to_qdrant(
+    pdf_dir: str,
     collection_name: str,
     vllm_api_base: str,
     vllm_embed_model: str,
@@ -96,10 +120,10 @@ def ingest_pdf_to_qdrant(
     chunk_overlap: int = 50,
 ) -> VectorStoreIndex:
     """
-    Ingest a PDF file into a Qdrant vector store.
+    Ingest all PDF files from a directory into a Qdrant vector store.
     
     Args:
-        pdf_path: Path to the PDF file
+        pdf_dir: Directory containing PDF files
         collection_name: Name of the Qdrant collection
         vllm_api_base: Base URL for the vLLM instance (with /v1 endpoint)
         vllm_embed_model: Name of the Embedding model 
@@ -111,8 +135,12 @@ def ingest_pdf_to_qdrant(
     Returns:
         VectorStoreIndex instance
     """
-    # Load PDF
-    documents = load_pdf(pdf_path)
+    # Find all PDF files
+    pdf_files = find_pdf_files(pdf_dir)
+    
+    if not pdf_files:
+        logger.warning(f"No PDF files found in {pdf_dir}")
+        return None
     
     # Setup Qdrant vector store
     vector_store = setup_qdrant(
@@ -142,15 +170,28 @@ def ingest_pdf_to_qdrant(
         ],
     )
     
-    # Process documents
-    logger.info("Processing documents through ingestion pipeline")
-    nodes = pipeline.run(documents=documents)
-    logger.info(f"Generated {len(nodes)} nodes from documents")
+    # Process each PDF file
+    all_nodes = []
+    for pdf_path in pdf_files:
+        try:
+            logger.info(f"Processing {pdf_path}")
+            documents = load_pdf(pdf_path)
+            
+            # Process documents
+            nodes = pipeline.run(documents=documents)
+            logger.info(f"Generated {len(nodes)} nodes from {pdf_path}")
+            
+            all_nodes.extend(nodes)
+        except Exception as e:
+            logger.error(f"Error processing {pdf_path}: {str(e)}")
+            continue
     
-    # Create index
+    logger.info(f"Total nodes generated: {len(all_nodes)}")
+    
+    # Create index with all nodes
     logger.info("Creating vector index")
     index = VectorStoreIndex(
-        nodes=nodes,
+        nodes=all_nodes,
         storage_context=storage_context,
         embed_model=embed_model,
     )
@@ -161,8 +202,8 @@ def main():
     """
     Main function to run the script.
     """
-    parser = argparse.ArgumentParser(description="Ingest PDF file to Qdrant vector database")
-    parser.add_argument("--pdf", required=True, help="Path to the PDF file")
+    parser = argparse.ArgumentParser(description="Ingest PDF files from directory to Qdrant vector database")
+    parser.add_argument("--pdf-dir", required=True, help="Path to the directory containing PDF files")
     parser.add_argument("--collection", required=True, help="Name of the Qdrant collection")
     parser.add_argument("--vllm-api", required=True, help="Base URL for the vLLM API (with /v1 endpoint)")
     parser.add_argument("--vllm-model", required=True, help="Name of the Embedding model")
@@ -174,9 +215,9 @@ def main():
     args = parser.parse_args()
     
     try:
-        # Ingest PDF to Qdrant
-        index = ingest_pdf_to_qdrant(
-            pdf_path=args.pdf,
+        # Ingest PDFs to Qdrant
+        index = ingest_pdfs_to_qdrant(
+            pdf_dir=args.pdf_dir,
             collection_name=args.collection,
             vllm_api_base=args.vllm_api,
             vllm_embed_model=args.vllm_model,
@@ -186,12 +227,15 @@ def main():
             chunk_overlap=args.chunk_overlap,
         )
         
-        logger.info(f"Successfully ingested PDF from {args.pdf} into Qdrant collection '{args.collection}'")
+        if not index:
+            return
+
+        logger.info(f"Successfully ingested PDF files from {args.pdf_dir} into Qdrant collection '{args.collection}'")
         
         # Example query
         logger.info("Running example query...")
         query_engine = index.as_query_engine()
-        response = query_engine.query("What is this document about?")
+        response = query_engine.query("What are these documents about?")
         print("\nExample query result:")
         print(response)
         
