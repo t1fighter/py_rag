@@ -27,7 +27,7 @@ import qdrant_client
 from qdrant_client.http.models import VectorParams, Distance
 # Vector store and embedding imports
 from llama_index.vector_stores.qdrant import QdrantVectorStore
-from llama_index.embeddings.openai import OpenAIEmbedding
+# from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai_like import OpenAILike
 
 # PDF reader - attempting to load the best available option
@@ -188,7 +188,6 @@ def ingest_pdfs_to_qdrant(
     pdf_dir: str,
     collection_name: str,
     vllm_api_base: str,
-    vllm_embed_model: str,
     qdrant_host: str = "localhost",
     qdrant_port: int = 6333,
     chunk_size: int = 512,
@@ -299,7 +298,6 @@ def main():
     parser.add_argument("--pdf-dir", required=True, help="Path to the directory containing PDF files")
     parser.add_argument("--collection", required=True, help="Name of the Qdrant collection")
     parser.add_argument("--vllm-api", required=True, help="Base URL for the vLLM API (with /v1 endpoint)")
-    parser.add_argument("--vllm-model", required=True, help="Name of the Embedding model")
     parser.add_argument("--qdrant-host", default="localhost", help="Qdrant server host")
     parser.add_argument("--qdrant-port", type=int, default=6333, help="Qdrant server port")
     parser.add_argument("--chunk-size", type=int, default=180, help="Size of text chunks")
@@ -313,7 +311,6 @@ def main():
             pdf_dir=args.pdf_dir,
             collection_name=args.collection,
             vllm_api_base=args.vllm_api,
-            vllm_embed_model=args.vllm_model,
             qdrant_host=args.qdrant_host,
             qdrant_port=args.qdrant_port,
             chunk_size=args.chunk_size,
