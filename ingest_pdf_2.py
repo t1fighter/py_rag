@@ -21,23 +21,93 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.extractors import TitleExtractor
 from llama_index.core.ingestion import IngestionPipeline
 
+
 # Qdrant client
 import qdrant_client
+from qdrant_client.http.models import VectorParams, Distance
 # Vector store and embedding imports
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.llms.openai_like import OpenAILike
 
 # PDF reader - attempting to load the best available option
-try:
-    from llama_index.readers.file import PyMuPDFReader as PDFReader
-    pdf_reader_name = "PyMuPDFReader"
-except ImportError:
-    try:
-        from llama_index.readers.file import PyPDFReader as PDFReader
-        pdf_reader_name = "PyPDFReader"
-    except ImportError:
-        from llama_index.readers.file import PDFReader
-        pdf_reader_name = "PDFReader"
+from llama_index.readers.file import PyMuPDFReader
+
+from typing import List
+from pydantic import BaseModel
+from llama_index.core.schema import Node, TransformComponent
+
+from typing import List
+from pydantic import BaseModel
+from llama_index.core.schema import TransformComponent, Node
+from llama_index.core.bridge.pydantic import Field
+
+class OpenAILikeTransform(TransformComponent, BaseModel):
+    llm: any = Field(..., description="OpenAI-like LLM to use for transformations")
+    
+    def __call__(self, nodes: List[Node], **kwargs) -> List[Node]:
+        # Validate that nodes is not None
+        if nodes is None:
+            print("Warning: Received None instead of a list of nodes")
+            return []
+            
+        try:
+            for node in nodes:
+                if node.text is None:
+                    print(f"Warning: Node {node.id} has None text, skipping")
+                    continue
+                    
+                # Call the remote LLM API to process node text
+                response = self.llm.complete(node.text)
+                
+                # Verify response structure
+                if response is None:
+                    print(f"Warning: LLM returned None for node {node.id}")
+                    continue
+                
+                # Update node text
+                if hasattr(response, 'text'):
+                    node.text = response.text
+                elif isinstance(response, str):
+                    node.text = response
+                else:
+                    print(f"Warning: Unexpected response type: {type(response)}")
+                    
+            return nodes
+            
+        except Exception as e:
+            print(f"Error in OpenAILikeTransform: {e}")
+            # Return the original nodes unchanged rather than crashing
+            return nodes
+    
+import requests
+from typing import List
+from llama_index.core.base.embeddings.base import BaseEmbedding
+from pydantic import Field
+
+# Minimal wrapper to call your vLLM embeddings endpoint.
+class VLLMEmbedding(BaseEmbedding):
+    # Declare fields as class attributes so Pydantic can track them.
+    api_base: str = Field(..., description="The API base URL for the vLLM server")
+    model: str = Field(..., description="The model name used for embeddings")
+
+    def _get_text_embedding(self, text: str) -> List[float]:
+        payload = {"model": self.model, "input": text}
+        response = requests.post(f"{self.api_base}/embeddings", json=payload)
+        response.raise_for_status()
+        return response.json()["data"][0]["embedding"]
+
+    def _get_query_embedding(self, text: str) -> List[float]:
+        # Use the same logic for query embedding.
+        return self._get_text_embedding(text)
+
+    async def _aget_query_embedding(self, text: str) -> List[float]:
+        # Synchronously call the method; for real async, use an async HTTP client.
+        return self._get_text_embedding(text)
+
+    async def _aget_text_embedding(self, text: str) -> List[float]:
+        return self._get_text_embedding(text)
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -79,7 +149,8 @@ def load_pdf(pdf_path: str) -> List[Document]:
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"PDF file not found at {pdf_path}")
     
-    logger.info(f"Loading PDF from {pdf_path} using {pdf_reader_name}")
+    logger.info(f"Loading PDF from {pdf_path}")
+    PDFReader=PyMuPDFReader()
     documents = PDFReader.load(file_path=pdf_path)
     
     logger.info(f"Loaded {len(documents)} document(s) from PDF")
@@ -99,6 +170,10 @@ def setup_qdrant(collection_name: str, host: str = "localhost", port: int = 6333
     """
     logger.info(f"Connecting to Qdrant at {host}:{port}")
     client = qdrant_client.QdrantClient(host=host, port=port)
+    try:
+        client.get_collection(collection_name).status
+    except:
+        client.create_collection(collection_name=collection_name,vectors_config=VectorParams(size=384, distance=Distance.COSINE))
     
     # Create vector store
     logger.info(f"Setting up vector store for collection: {collection_name}")
@@ -151,13 +226,29 @@ def ingest_pdfs_to_qdrant(
     
     # Create embedding model - using OpenAI compatible API to vLLM
     logger.info(f"Configuring embedding model with vLLM API at {vllm_api_base}")
-    embed_model = OpenAIEmbedding(
-        api_base=vllm_api_base,
-        api_key="dummy-key",  # Can be dummy for local vLLM
-        model=vllm_embed_model,
-        dimensions=384
+    os.environ["OPENAI_API_KEY"] = "aaaaa"
+    os.environ["OPENAI_API_BASE"] = "http://vllm2:8000/v1"
+    # embed_model = OpenAIEmbedding(
+    #     api_base=vllm_api_base,
+    #     api_key="dummy-key"  # Can be dummy for local vLLM
+    #     model=vllm_embed_model
+    # )
+    embedding_model = VLLMEmbedding(
+    api_base="http://vllm2:8000/v1",
+    model="sentence-transformers/all-MiniLM-L6-v2"  # adjust as needed
     )
-    
+    openai_like_llm = OpenAILike(
+        model="sentence-transformers/all-MiniLM-L6-v2",  # or your custom model name
+        api_base="http://vllm2:8000/v1",
+        api_key="dummy"         # you can set this to any dummy string if not required
+    )
+    custom_transform = OpenAILikeTransform(llm=openai_like_llm)
+    # external_llm = OpenAILike(
+    #     api_key="dummy_api_key",  # Replace if your server requires a key
+    #     endpoint=vllm_api_base,
+    #     model=vllm_embed_model,
+    #     is_chat_model=False,
+    # )
     
     # Create storage context
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
@@ -167,8 +258,8 @@ def ingest_pdfs_to_qdrant(
     pipeline = IngestionPipeline(
         transformations=[
             SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap),
-            TitleExtractor(),  # Extract titles from content where possible
-            embed_model,       # Generate embeddings
+            #TitleExtractor(),  # Extract titles from content where possible
+            custom_transform      # Generate embeddings
         ],
     )
     
@@ -195,7 +286,7 @@ def ingest_pdfs_to_qdrant(
     index = VectorStoreIndex(
         nodes=all_nodes,
         storage_context=storage_context,
-        embed_model=embed_model,
+        embed_model=embedding_model
     )
     
     return index
@@ -211,8 +302,8 @@ def main():
     parser.add_argument("--vllm-model", required=True, help="Name of the Embedding model")
     parser.add_argument("--qdrant-host", default="localhost", help="Qdrant server host")
     parser.add_argument("--qdrant-port", type=int, default=6333, help="Qdrant server port")
-    parser.add_argument("--chunk-size", type=int, default=512, help="Size of text chunks")
-    parser.add_argument("--chunk-overlap", type=int, default=50, help="Overlap between chunks")
+    parser.add_argument("--chunk-size", type=int, default=180, help="Size of text chunks")
+    parser.add_argument("--chunk-overlap", type=int, default=25, help="Overlap between chunks")
     
     args = parser.parse_args()
     
@@ -235,11 +326,11 @@ def main():
         logger.info(f"Successfully ingested PDF files from {args.pdf_dir} into Qdrant collection '{args.collection}'")
         
         # Example query
-        logger.info("Running example query...")
-        query_engine = index.as_query_engine()
-        response = query_engine.query("What are these documents about?")
-        print("\nExample query result:")
-        print(response)
+        # logger.info("Running example query...")
+        # query_engine = index.as_query_engine()
+        # response = query_engine.query("What are these documents about?")
+        # print("\nExample query result:")
+        # print(response)
         
     except Exception as e:
         logger.error(f"Error during ingestion: {str(e)}", exc_info=True)

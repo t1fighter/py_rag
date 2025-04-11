@@ -52,7 +52,8 @@ import qdrant_client
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 
 # - OpenAIEmbedding: Uses OpenAI-compatible API for generating embeddings
-from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.embeddings.openai import  OpenAIEmbedding
+# from openai import OpenAI
 
 # PDF reader - attempting to load the best available option
 # The script tries to use faster/better PDF readers first and falls back
@@ -186,7 +187,7 @@ def ingest_pdfs_to_qdrant(
     pdf_dir: str,
     collection_name: str,
     vllm_api_base: str,
-    vllm_embed_model: str,
+    # vllm_embed_model: str,
     qdrant_host: str = "localhost",
     qdrant_port: int = 6333,
     chunk_size: int = 512,
@@ -251,16 +252,20 @@ def ingest_pdfs_to_qdrant(
     # This connects to a local vLLM server that provides OpenAI-compatible API
     logger.info(f"Configuring embedding model with vLLM API at {vllm_api_base}")
     embed_model = OpenAIEmbedding(
-        api_base=vllm_api_base,  # URL to the vLLM server's API endpoint
-        api_key="dummy-key",     # Can be dummy for local vLLM
-        model=vllm_embed_model   # Specific model to use for embeddings
+        api_base=vllm_api_base,
+        api_key="dummy-key",  # Can be dummy for local vLLM
+        # model=vllm_embed_model
     )
+    
+    # models = embed_model.models.list()
+    # model = models.data[0].id
     
     # Create storage context - manages where and how data is stored
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
     
     # Create ingestion pipeline - defines the document processing workflow
     logger.info(f"Setting up ingestion pipeline with chunk size {chunk_size} and overlap {chunk_overlap}")
+    os.environ["OPENAI_API_KEY"] = "aaaaa"
     pipeline = IngestionPipeline(
         transformations=[
             # Split documents into smaller, manageable chunks
@@ -268,6 +273,7 @@ def ingest_pdfs_to_qdrant(
             # Extract titles from content where possible
             TitleExtractor(),
             # Generate embeddings for each chunk
+            # embed_model.embeddings.create(model=model),
             embed_model,
         ],
     )
@@ -328,8 +334,8 @@ def main():
                       help="Name of the Qdrant collection")
     parser.add_argument("--vllm-api", required=True, 
                       help="Base URL for the vLLM API (with /v1 endpoint)")
-    parser.add_argument("--vllm-model", required=True, 
-                      help="Name of the embedding model")
+    # parser.add_argument("--vllm-model", required=True, 
+                    #   help="Name of the embedding model")
     
     # Optional arguments with defaults:
     parser.add_argument("--qdrant-host", default="localhost", 
@@ -349,7 +355,7 @@ def main():
             pdf_dir=args.pdf_dir,
             collection_name=args.collection,
             vllm_api_base=args.vllm_api,
-            vllm_embed_model=args.vllm_model,
+            # vllm_embed_model=args.vllm_model,
             qdrant_host=args.qdrant_host,
             qdrant_port=args.qdrant_port,
             chunk_size=args.chunk_size,
