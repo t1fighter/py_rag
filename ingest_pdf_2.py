@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Created by AI: Claude Sonnet 3.7 Thinking
-# Tuned / Debugged by t1fighter@github
+# Initially created by AI: Claude Sonnet 3.7 Thinking 
+# Tuned / Debugged and made it work at all by t1fighter@github
 """
 PDF Directory to Qdrant Vector Database Ingestion
 ------------------------------------------------
