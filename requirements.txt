@@ -1,0 +1,11 @@
+llama-index-core
+llama-index-vector-stores-qdrant
+llama-index-embeddings-openai
+llama-index-readers-file
+qdrant-client
+pymupdf
+pypdf
+llama-index-llms-openai
+llama_index.embeddings.vllm
+llama_index.llms.vllm
+llama_index.llms.openai_like

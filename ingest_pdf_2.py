@@ -24,11 +24,13 @@ from llama_index.core.ingestion import IngestionPipeline
 
 # Qdrant client
 import qdrant_client
+from qdrant_client.models import Filter, FieldCondition, MatchValue
 from qdrant_client.http.models import VectorParams, Distance
 # Vector store and embedding imports
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 # from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai_like import OpenAILike
+from openai import OpenAI
 
 # PDF reader - attempting to load the best available option
 from llama_index.readers.file import PyMuPDFReader
@@ -58,7 +60,7 @@ class OpenAILikeTransform(TransformComponent, BaseModel):
                     continue
                     
                 # Call the remote LLM API to process node text
-                response = self.llm.complete(node.text)
+                response = self.llm.embed(node.text)
                 
                 # Verify response structure
                 if response is None:
@@ -170,11 +172,9 @@ def setup_qdrant(collection_name: str, host: str = "localhost", port: int = 6333
     """
     logger.info(f"Connecting to Qdrant at {host}:{port}")
     client = qdrant_client.QdrantClient(host=host, port=port)
-    try:
-        client.get_collection(collection_name).status
-    except:
+    if not client.collection_exists(collection_name=collection_name):
         client.create_collection(collection_name=collection_name,vectors_config=VectorParams(size=384, distance=Distance.COSINE))
-    
+
     # Create vector store
     logger.info(f"Setting up vector store for collection: {collection_name}")
     vector_store = QdrantVectorStore(
@@ -182,12 +182,27 @@ def setup_qdrant(collection_name: str, host: str = "localhost", port: int = 6333
         client=client,
     )
     
-    return vector_store
+    return vector_store, client
+
+def remove_already_ingested_pdf(qdrant_client: qdrant_client, collection_name: str, pdf_files: list) -> List[str]:
+    pdf_files_clean=[]
+    print("Cleaning up PDF files which are already ingested")
+    for file in pdf_files:
+        n=qdrant_client.count(collection_name,count_filter=Filter(must=[FieldCondition(key="file_path",match=MatchValue(value=file))]),exact=True)
+        if n.count == 0:
+            pdf_files_clean.append(file)
+        else:
+            print(f"{file} ist already in collection {collection_name}! Skipping...")
+    
+    return pdf_files_clean
 
 def ingest_pdfs_to_qdrant(
     pdf_dir: str,
     collection_name: str,
-    vllm_api_base: str,
+    vllm_embed_api_base: str,
+    vllm_embed_model: str,
+    vllm_llm_api_base: str,
+    vllm_llm_model: str,
     qdrant_host: str = "localhost",
     qdrant_port: int = 6333,
     chunk_size: int = 512,
@@ -199,8 +214,7 @@ def ingest_pdfs_to_qdrant(
     Args:
         pdf_dir: Directory containing PDF files
         collection_name: Name of the Qdrant collection
-        vllm_api_base: Base URL for the vLLM instance (with /v1 endpoint)
-        vllm_embed_model: Name of the Embedding model 
+        vllm_embed_api_base: Base URL for the vLLM instance (with /v1 endpoint)
         qdrant_host: Qdrant server host
         qdrant_port: Qdrant server port
         chunk_size: Size of text chunks for indexing
@@ -209,6 +223,13 @@ def ingest_pdfs_to_qdrant(
     Returns:
         VectorStoreIndex instance
     """
+    # Setup Qdrant vector store
+    vector_store, client = setup_qdrant(
+        collection_name=collection_name,
+        host=qdrant_host,
+        port=qdrant_port
+    )
+    
     # Find all PDF files
     pdf_files = find_pdf_files(pdf_dir)
     
@@ -216,35 +237,39 @@ def ingest_pdfs_to_qdrant(
         logger.warning(f"No PDF files found in {pdf_dir}")
         return None
     
-    # Setup Qdrant vector store
-    vector_store = setup_qdrant(
-        collection_name=collection_name,
-        host=qdrant_host,
-        port=qdrant_port
-    )
+    # Clean out Files that are already stored in the vectordb
+    pdf_files_clean = remove_already_ingested_pdf(qdrant_client=client, collection_name=collection_name, pdf_files=pdf_files)
     
     # Create embedding model - using OpenAI compatible API to vLLM
-    logger.info(f"Configuring embedding model with vLLM API at {vllm_api_base}")
+    logger.info(f"Configuring embedding model with vLLM API at {vllm_embed_api_base}")
     os.environ["OPENAI_API_KEY"] = "aaaaa"
     os.environ["OPENAI_API_BASE"] = "http://vllm2:8000/v1"
     # embed_model = OpenAIEmbedding(
-    #     api_base=vllm_api_base,
+    #     api_base=vllm_embed_api_base,
     #     api_key="dummy-key"  # Can be dummy for local vLLM
     #     model=vllm_embed_model
     # )
     embedding_model = VLLMEmbedding(
-    api_base="http://vllm2:8000/v1",
-    model="sentence-transformers/all-MiniLM-L6-v2"  # adjust as needed
+        api_base=vllm_embed_api_base,
+        model=vllm_embed_model  # adjust as needed
     )
-    openai_like_llm = OpenAILike(
-        model="sentence-transformers/all-MiniLM-L6-v2",  # or your custom model name
-        api_base="http://vllm2:8000/v1",
-        api_key="dummy"         # you can set this to any dummy string if not required
-    )
-    custom_transform = OpenAILikeTransform(llm=openai_like_llm)
+    # openai_like_llm = OpenAILike(
+    #     model=vllm_embed_model,  # or your custom model name
+    #     api_base=vllm_embed_api_base,
+    #     api_key="dummy"         # you can set this to any dummy string if not required
+    # )
+    
+    # embed_vllm = OpenAI(
+    # base_url=vllm_embed_api_base,
+    # )
+    # models = embed_vllm.models.list()
+    # model = models.data[0].id
+    
+    # custom_transform = OpenAILikeTransform(llm=openai_like_llm)
+    # custom_transform = OpenAILikeTransform(llm=embed_vllm, model=model)
     # external_llm = OpenAILike(
     #     api_key="dummy_api_key",  # Replace if your server requires a key
-    #     endpoint=vllm_api_base,
+    #     endpoint=vllm_embed_api_base,
     #     model=vllm_embed_model,
     #     is_chat_model=False,
     # )
@@ -258,13 +283,15 @@ def ingest_pdfs_to_qdrant(
         transformations=[
             SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap),
             #TitleExtractor(),  # Extract titles from content where possible
-            custom_transform      # Generate embeddings
+            #custom_transform      # Generate embeddings
+            VLLMEmbedding(api_base=vllm_embed_api_base,model=vllm_embed_model)
         ],
+        vector_store=vector_store
     )
     
     # Process each PDF file
     all_nodes = []
-    for pdf_path in pdf_files:
+    for pdf_path in pdf_files_clean:
         try:
             logger.info(f"Processing {pdf_path}")
             documents = load_pdf(pdf_path)
@@ -279,6 +306,7 @@ def ingest_pdfs_to_qdrant(
             continue
     
     logger.info(f"Total nodes generated: {len(all_nodes)}")
+    #print(all_nodes)
     
     # Create index with all nodes
     logger.info("Creating vector index")
@@ -288,6 +316,11 @@ def ingest_pdfs_to_qdrant(
         embed_model=embedding_model
     )
     
+    #index = VectorStoreIndex.from_vector_store(vector_store)
+    # VectorStoreIndex.from_vector_store(vector_store)
+    #print(index)
+    
+    #return index
     return index
 
 def main():
@@ -297,7 +330,10 @@ def main():
     parser = argparse.ArgumentParser(description="Ingest PDF files from directory to Qdrant vector database")
     parser.add_argument("--pdf-dir", required=True, help="Path to the directory containing PDF files")
     parser.add_argument("--collection", required=True, help="Name of the Qdrant collection")
-    parser.add_argument("--vllm-api", required=True, help="Base URL for the vLLM API (with /v1 endpoint)")
+    parser.add_argument("--vllm-embed-api", required=True, help="Base URL for the vLLM API (with /v1 endpoint)")
+    parser.add_argument("--vllm-embed-model", required=True, help="Embedding Model to use from vLLM Base")
+    parser.add_argument("--vllm-llm-api", required=True, help="Base URL for the vLLM API (with /v1 endpoint)")
+    parser.add_argument("--vllm-llm-model", required=True, help="Embedding Model to use from vLLM Base")
     parser.add_argument("--qdrant-host", default="localhost", help="Qdrant server host")
     parser.add_argument("--qdrant-port", type=int, default=6333, help="Qdrant server port")
     parser.add_argument("--chunk-size", type=int, default=180, help="Size of text chunks")
@@ -310,7 +346,10 @@ def main():
         index = ingest_pdfs_to_qdrant(
             pdf_dir=args.pdf_dir,
             collection_name=args.collection,
-            vllm_api_base=args.vllm_api,
+            vllm_embed_api_base=args.vllm_embed_api,
+            vllm_embed_model=args.vllm_embed_model,
+            vllm_llm_api_base=args.vllm_llm_api,
+            vllm_llm_model=args.vllm_llm_model,
             qdrant_host=args.qdrant_host,
             qdrant_port=args.qdrant_port,
             chunk_size=args.chunk_size,
