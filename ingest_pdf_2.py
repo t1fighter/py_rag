@@ -18,7 +18,7 @@ from typing import List
 # LlamaIndex core imports
 from llama_index.core import Document, VectorStoreIndex, StorageContext
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.extractors import TitleExtractor
+from llama_index.core import extractors
 from llama_index.core.ingestion import IngestionPipeline
 
 
@@ -158,7 +158,7 @@ def load_pdf(pdf_path: str) -> List[Document]:
     logger.info(f"Loaded {len(documents)} document(s) from PDF")
     return documents
 
-def setup_qdrant(collection_name: str, host: str = "localhost", port: int = 6333) -> QdrantVectorStore:
+def setup_qdrant(collection_name: str, dimension: str, host: str = "localhost", port: int = 6333, ) -> QdrantVectorStore:
     """
     Set up a Qdrant vector store.
     
@@ -173,7 +173,7 @@ def setup_qdrant(collection_name: str, host: str = "localhost", port: int = 6333
     logger.info(f"Connecting to Qdrant at {host}:{port}")
     client = qdrant_client.QdrantClient(host=host, port=port)
     if not client.collection_exists(collection_name=collection_name):
-        client.create_collection(collection_name=collection_name,vectors_config=VectorParams(size=384, distance=Distance.COSINE))
+        client.create_collection(collection_name=collection_name,vectors_config=VectorParams(size=dimension, distance=Distance.COSINE))
 
     # Create vector store
     logger.info(f"Setting up vector store for collection: {collection_name}")
@@ -200,9 +200,7 @@ def ingest_pdfs_to_qdrant(
     pdf_dir: str,
     collection_name: str,
     vllm_embed_api_base: str,
-    vllm_embed_model: str,
     vllm_llm_api_base: str,
-    vllm_llm_model: str,
     qdrant_host: str = "localhost",
     qdrant_port: int = 6333,
     chunk_size: int = 512,
@@ -223,11 +221,82 @@ def ingest_pdfs_to_qdrant(
     Returns:
         VectorStoreIndex instance
     """
+    # Setup LLM and embedding models
+    # Create embedding model - using OpenAI compatible API to vLLM
+    os.environ["OPENAI_API_KEY"] = "aaaaa"
+    #os.environ["OPENAI_API_BASE"] = "http://vllm2:8000/v1"
+    # embed_model = OpenAIEmbedding(
+    #     api_base=vllm_embed_api_base,
+    #     api_key="dummy-key"  # Can be dummy for local vLLM
+    #     model=vllm_embed_model
+    # )
+    # openai_like_llm = OpenAILike(
+    #     model=vllm_embed_model,  # or your custom model name
+    #     api_base=vllm_embed_api_base,
+    #     api_key="dummy"         # you can set this to any dummy string if not required
+    # )
+
+    
+    # custom_transform = OpenAILikeTransform(llm=openai_like_llm)
+    # custom_transform = OpenAILikeTransform(llm=embed_vllm, model=model)
+    # is used by the extractors in the ingestion pipeline
+    logger.info(f"Configuring llm model for advanced RAG with vLLM API at {vllm_llm_api_base}")
+    # system_prompt for llm which is used bei llama_index extractors
+    system_prompt="""
+        <|im_start|>system_prompt
+        This is your system prompt.
+        - Keep your answers short and accurate.
+        - Answer in a single sentence.
+        - The summary answer must not exceed 50 words.
+        - Only do what is asked of you, nothing else.
+        - Do not create additional explanations.
+        <|im_end|>
+        """
+    
+    # from llama_index.llms.openai import OpenAI
+    # Get models from vllm apis
+    # get llm model
+    llm = OpenAI(
+        base_url=vllm_llm_api_base,
+        api_key="aaaaa",
+        #model=vllm_llm_model
+    )
+    llm_model = llm.models.list().data[0].id
+    
+    llm = OpenAILike(
+        api_key="dummy_api_key",  # Replace if your server requires a key
+        api_base=vllm_llm_api_base,
+        # model=vllm_llm_model,
+        model=llm_model,
+        max_tokens=6000,
+        system_prompt=system_prompt,
+        temperature=0.1,
+        #timeout=240
+    )
+
+    logger.info(f"Configuring embedding model with vLLM API at {vllm_embed_api_base}")    
+    # get embed model
+    embed = OpenAI(
+        base_url=vllm_embed_api_base,
+        api_key="aaaaa",
+        #model=vllm_llm_model
+    )
+    embed_model = embed.models.list().data[0].id
+    
+    embedding_model = VLLMEmbedding(
+        api_base=vllm_embed_api_base,
+        model=embed_model  # adjust as needed
+    )
+    
+    
     # Setup Qdrant vector store
+    # Get Dimension from used embed model
+    ellm = VLLMEmbedding(api_base=vllm_embed_api_base,model=embed_model).get_text_embedding("omeg")
     vector_store, client = setup_qdrant(
         collection_name=collection_name,
+        dimension=len(ellm),
         host=qdrant_host,
-        port=qdrant_port
+        port=qdrant_port,
     )
     
     # Find all PDF files
@@ -238,41 +307,7 @@ def ingest_pdfs_to_qdrant(
         return None
     
     # Clean out Files that are already stored in the vectordb
-    pdf_files_clean = remove_already_ingested_pdf(qdrant_client=client, collection_name=collection_name, pdf_files=pdf_files)
-    
-    # Create embedding model - using OpenAI compatible API to vLLM
-    logger.info(f"Configuring embedding model with vLLM API at {vllm_embed_api_base}")
-    os.environ["OPENAI_API_KEY"] = "aaaaa"
-    os.environ["OPENAI_API_BASE"] = "http://vllm2:8000/v1"
-    # embed_model = OpenAIEmbedding(
-    #     api_base=vllm_embed_api_base,
-    #     api_key="dummy-key"  # Can be dummy for local vLLM
-    #     model=vllm_embed_model
-    # )
-    embedding_model = VLLMEmbedding(
-        api_base=vllm_embed_api_base,
-        model=vllm_embed_model  # adjust as needed
-    )
-    # openai_like_llm = OpenAILike(
-    #     model=vllm_embed_model,  # or your custom model name
-    #     api_base=vllm_embed_api_base,
-    #     api_key="dummy"         # you can set this to any dummy string if not required
-    # )
-    
-    # embed_vllm = OpenAI(
-    # base_url=vllm_embed_api_base,
-    # )
-    # models = embed_vllm.models.list()
-    # model = models.data[0].id
-    
-    # custom_transform = OpenAILikeTransform(llm=openai_like_llm)
-    # custom_transform = OpenAILikeTransform(llm=embed_vllm, model=model)
-    # external_llm = OpenAILike(
-    #     api_key="dummy_api_key",  # Replace if your server requires a key
-    #     endpoint=vllm_embed_api_base,
-    #     model=vllm_embed_model,
-    #     is_chat_model=False,
-    # )
+    pdf_files_clean = remove_already_ingested_pdf(qdrant_client=client, collection_name=collection_name, pdf_files=pdf_files)  
     
     # Create storage context
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
@@ -282,9 +317,11 @@ def ingest_pdfs_to_qdrant(
     pipeline = IngestionPipeline(
         transformations=[
             SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap),
-            #TitleExtractor(),  # Extract titles from content where possible
+            # extractors.TitleExtractor(llm=llm),  # Extract titles from content where possible
+            # extractors.QuestionsAnsweredExtractor(llm=llm,questions=2),
+            extractors.SummaryExtractor(llm=llm),
             #custom_transform      # Generate embeddings
-            VLLMEmbedding(api_base=vllm_embed_api_base,model=vllm_embed_model)
+            VLLMEmbedding(api_base=vllm_embed_api_base,model=embed_model)
         ],
         vector_store=vector_store
     )
@@ -321,7 +358,7 @@ def ingest_pdfs_to_qdrant(
     #print(index)
     
     #return index
-    return index
+    return index, llm
 
 def main():
     """
@@ -331,25 +368,25 @@ def main():
     parser.add_argument("--pdf-dir", required=True, help="Path to the directory containing PDF files")
     parser.add_argument("--collection", required=True, help="Name of the Qdrant collection")
     parser.add_argument("--vllm-embed-api", required=True, help="Base URL for the vLLM API (with /v1 endpoint)")
-    parser.add_argument("--vllm-embed-model", required=True, help="Embedding Model to use from vLLM Base")
+    #parser.add_argument("--vllm-embed-model", required=True, help="Embedding Model to use from vLLM Base")
     parser.add_argument("--vllm-llm-api", required=True, help="Base URL for the vLLM API (with /v1 endpoint)")
-    parser.add_argument("--vllm-llm-model", required=True, help="Embedding Model to use from vLLM Base")
+    #parser.add_argument("--vllm-llm-model", required=True, help="Embedding Model to use from vLLM Base")
     parser.add_argument("--qdrant-host", default="localhost", help="Qdrant server host")
     parser.add_argument("--qdrant-port", type=int, default=6333, help="Qdrant server port")
-    parser.add_argument("--chunk-size", type=int, default=180, help="Size of text chunks")
+    parser.add_argument("--chunk-size", type=int, default=300, help="Size of text chunks")
     parser.add_argument("--chunk-overlap", type=int, default=25, help="Overlap between chunks")
     
     args = parser.parse_args()
     
     try:
         # Ingest PDFs to Qdrant
-        index = ingest_pdfs_to_qdrant(
+        index, llm = ingest_pdfs_to_qdrant(
             pdf_dir=args.pdf_dir,
             collection_name=args.collection,
             vllm_embed_api_base=args.vllm_embed_api,
-            vllm_embed_model=args.vllm_embed_model,
+            #vllm_embed_model=args.vllm_embed_model,
             vllm_llm_api_base=args.vllm_llm_api,
-            vllm_llm_model=args.vllm_llm_model,
+            #vllm_llm_model=args.vllm_llm_model,
             qdrant_host=args.qdrant_host,
             qdrant_port=args.qdrant_port,
             chunk_size=args.chunk_size,
@@ -363,7 +400,7 @@ def main():
         
         # Example query
         # logger.info("Running example query...")
-        # query_engine = index.as_query_engine()
+        # query_engine = index.as_query_engine(llm=llm)
         # response = query_engine.query("What are these documents about?")
         # print("\nExample query result:")
         # print(response)
