@@ -16,7 +16,7 @@ import logging
 import argparse
 import json
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import requests
 from datetime import datetime
 
@@ -24,6 +24,8 @@ from datetime import datetime
 from llama_index.core import VectorStoreIndex, StorageContext
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.postprocessor import LLMRerank
+from llama_index.core.schema import NodeWithScore
 
 # Qdrant client
 import qdrant_client
@@ -159,7 +161,162 @@ class DebugOpenAILike(OpenAILike):
             print(f"│ {line[:76]:<76} │")
         print("└" + "─" * 78 + "┘")
         
+        return result   
+
+class DebugLLMRerank(LLMRerank):
+    """Enhanced LLMRerank with comprehensive debug output."""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        print_section("DEBUG RERANKER INITIALIZED", "🔄")
+        print(f"📊 Configuration:")
+        print(f"  Choice batch size: {self.choice_batch_size}")
+        print(f"  Top N: {self.top_n}")
+        print(f"  LLM model: {self.llm.model if hasattr(self.llm, 'model') else 'Unknown'}")
+    
+    def _postprocess_nodes(
+        self,
+        nodes: List[NodeWithScore],
+        query_bundle: Optional[Any] = None,
+    ) -> List[NodeWithScore]:
+        """Postprocess nodes with comprehensive debug output."""
+        
+        print_header("RERANKING PROCESS", "🔄")
+        
+        # Debug input information
+        print_section("RERANK INPUT", "📥")
+        print(f"🔍 Query: {query_bundle.query_str if query_bundle else 'No query'}")
+        print(f"📄 Input nodes count: {len(nodes)}")
+        print(f"⚙️ Target top_n: {self.top_n}")
+        
+        # Show input nodes details
+        print_section("INPUT NODES DETAILS", "📚")
+        for i, node in enumerate(nodes, 1):
+            score = getattr(node, 'score', 'N/A')
+            file_path = node.node.metadata.get('file_path', 'Unknown')
+            text_preview = node.node.text[:100] + "..." if len(node.node.text) > 100 else node.node.text
+            
+            print(f"\n📄 Node {i}:")
+            print(f"  📊 Initial Score: {score:.4f}" if isinstance(score, (int, float)) else f"  📊 Score: {score}")
+            print(f"  📁 File: {file_path}")
+            print(f"  📝 Text Preview: {text_preview}")
+        
+        # Start reranking process
+        print_section("RERANKING EXECUTION", "⚡")
+        start_time = time.time()
+        
+        try:
+            # Call parent method with debug wrapping
+            reranked_nodes = super()._postprocess_nodes(nodes, query_bundle)
+            
+            duration = time.time() - start_time
+            print(f"⏱️ Reranking Duration: {duration:.3f}s")
+            
+            # Debug output results
+            self._debug_rerank_results(nodes, reranked_nodes, query_bundle)
+            
+            return reranked_nodes
+            
+        except Exception as e:
+            duration = time.time() - start_time
+            print(f"❌ Reranking Error after {duration:.3f}s: {e}")
+            print_section("ERROR DETAILS", "🐛")
+            import traceback
+            traceback.print_exc()
+            raise
+    
+    def _debug_rerank_results(
+        self, 
+        original_nodes: List[NodeWithScore], 
+        reranked_nodes: List[NodeWithScore],
+        query_bundle: Optional[Any] = None
+    ):
+        """Debug output for reranking results."""
+        
+        print_section("RERANKING RESULTS", "🎯")
+        print(f"📥 Original nodes: {len(original_nodes)}")
+        print(f"📤 Reranked nodes: {len(reranked_nodes)}")
+        print(f"🔢 Requested top_n: {self.top_n}")
+        
+        # Show reranked results
+        print_section("RERANKED NODE DETAILS", "🏆")
+        for i, node in enumerate(reranked_nodes, 1):
+            score = getattr(node, 'score', 'N/A')
+            file_path = node.node.metadata.get('file_path', 'Unknown')
+            text_preview = node.node.text[:100] + "..." if len(node.node.text) > 100 else node.node.text
+            
+            # Find original position
+            original_pos = "Not found"
+            for j, orig_node in enumerate(original_nodes):
+                if orig_node.node.node_id == node.node.node_id:
+                    original_pos = j + 1
+                    break
+            
+            print(f"\n🥇 Rank {i} (was position {original_pos}):")
+            print(f"  📊 Rerank Score: {score:.4f}" if isinstance(score, (int, float)) else f"  📊 Score: {score}")
+            print(f"  📁 File: {file_path}")
+            print(f"  📝 Text Preview: {text_preview}")
+        
+        # Show ranking changes
+        if len(reranked_nodes) > 0:
+            print_section("RANKING CHANGES ANALYSIS", "📈")
+            changes = []
+            for i, reranked_node in enumerate(reranked_nodes):
+                for j, original_node in enumerate(original_nodes):
+                    if original_node.node.node_id == reranked_node.node.node_id:
+                        change = j - i  # Positive means moved up
+                        changes.append((i+1, j+1, change, reranked_node.node.metadata.get('file_path', 'Unknown')))
+                        break
+            
+            for new_pos, old_pos, change, file_path in changes:
+                direction = "↗️" if change > 0 else "↘️" if change < 0 else "➡️"
+                print(f"  {direction} Position {old_pos} → {new_pos} (change: {change:+d}) - {file_path}")
+
+# Custom LLM wrapper for reranking debug
+class DebugRerankerLLM(DebugOpenAILike):
+    """Enhanced LLM specifically for reranking with detailed debug output."""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        print_section("RERANKER LLM INITIALIZED", "🤖")
+        print(f"🔧 Reranker LLM Configuration:")
+        print(f"  Model: {self.model}")
+        print(f"  API Base: {self.api_base}")
+        print(f"  Max Tokens: {self.max_tokens}")
+        print(f"  Temperature: {self.temperature}")
+    
+    def complete(self, prompt, **kwargs):
+        """Override complete method with reranker-specific debug output."""
+        print_section("RERANKER LLM CALL", "🔄")
+        print(f"📝 Reranking Prompt (length: {len(str(prompt))} chars):")
+        print("┌" + "─" * 78 + "┐")
+        prompt_str = str(prompt)
+        for line in prompt_str.split('\n'):
+            print(f"│ {line[:76]:<76} │")
+        print("└" + "─" * 78 + "┘")
+        
+        print(f"🔧 Reranking Parameters:")
+        for key, value in kwargs.items():
+            print(f"  {key}: {value}")
+        
+        start_time = time.time()
+        result = super().complete(prompt, **kwargs)
+        duration = time.time() - start_time
+        
+        print(f"⏱️ Reranking LLM Duration: {duration:.3f}s")
+        print(f"📤 Reranking LLM Response (length: {len(str(result))} chars):")
+        print("┌" + "─" * 78 + "┐")
+        response_text = str(result)
+        for line in response_text.split('\n'):
+            print(f"│ {line[:76]:<76} │")
+        print("└" + "─" * 78 + "┘")
+        
+        # Additional reranking-specific analysis
+        if "1." in response_text or "2." in response_text:
+            print("🎯 Detected numbered ranking format in response")
+        
         return result
+
 
 def debug_qdrant_collection_info(client: qdrant_client.QdrantClient, collection_name: str):
     """Print detailed information about the Qdrant collection"""
@@ -228,10 +385,10 @@ This is your system prompt.
         api_key="dummy_api_key",
         api_base=vllm_llm_api_base,
         model=llm_model,
-        max_tokens=6000,
-        context_window=11000,
+        max_tokens=4000,
+        context_window=20000,
         system_prompt=system_prompt,
-        temperature=0.1,
+        temperature=0.2,
     )
     print("✅ LLM client configured")
 
@@ -257,6 +414,40 @@ This is your system prompt.
         model=embed_model_name
     )
     print("✅ Embedding model configured")
+
+    # Initialize rerank model    
+    # rerank_model = OpenAILike(
+    #     api_key="dummy_api_key",
+    #     api_base=vllm_llm_api_base,
+    #     model=llm_model,
+    #     max_tokens=6000,
+    #     context_window=11000,
+    #     system_prompt=system_prompt,
+    #     temperature=0.1,
+    # )
+    
+    # Replace this section in setup_query_engine function:
+    # reranker = LLMRerank(
+    #     choice_batch_size=5, # How many choices to rank at once
+    #     top_n=3, # Number of top documents to return after reranking
+    #     llm=llm # The LLM to use for reranking
+    # )
+
+    # With this enhanced debug version:
+    reranker_llm = DebugRerankerLLM(
+        api_key="dummy_api_key",
+        api_base=vllm_llm_api_base,
+        model=llm_model,
+        max_tokens=1000,
+        context_window=20000,
+        system_prompt=system_prompt,
+        temperature=0.1,
+    )
+    reranker = DebugLLMRerank(
+        choice_batch_size=5,  # How many choices to rank at once
+        top_n=3,  # Number of top documents to return after reranking
+        llm=reranker_llm  # The debug-wrapped LLM for reranking
+    )
 
     # Setup Qdrant connection
     print_section("QDRANT CONNECTION", "🗄️")
@@ -290,7 +481,8 @@ This is your system prompt.
     print_section("QUERY ENGINE SETUP", "⚙️")
     query_engine = index.as_query_engine(
         llm=llm,
-        similarity_top_k=similarity_top_k
+        similarity_top_k=similarity_top_k,
+        node_postprocessors=[reranker]
     )
     print(f"✅ Query engine created with top_k={similarity_top_k}")
 

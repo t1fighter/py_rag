@@ -14,9 +14,10 @@ from typing import List
 import requests
 
 # LlamaIndex core imports
-from llama_index.core import VectorStoreIndex, StorageContext
+from llama_index.core import VectorStoreIndex, StorageContext, SimpleDirectoryReader
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.postprocessor import LLMRerank
 
 # Qdrant client
 import qdrant_client
@@ -91,8 +92,8 @@ This is your system prompt.
         api_key="dummy_api_key",
         api_base=vllm_llm_api_base,
         model=llm_model,
-        max_tokens=6000,
-        context_window=11000,
+        max_tokens=10000,
+        context_window=20000,
         system_prompt=system_prompt,
         temperature=0.1,
     )
@@ -108,6 +109,23 @@ This is your system prompt.
     embedding_model = VLLMEmbedding(
         api_base=vllm_embed_api_base,
         model=embed_model_name
+    )
+    
+    # Initialize rerank model    
+    # rerank_model = OpenAILike(
+    #     api_key="dummy_api_key",
+    #     api_base=vllm_llm_api_base,
+    #     model=llm_model,
+    #     max_tokens=6000,
+    #     context_window=11000,
+    #     system_prompt=system_prompt,
+    #     temperature=0.1,
+    # )
+    
+    reranker = LLMRerank(
+        choice_batch_size=5,  # How many choices to rank at once
+        top_n=3,              # Number of top documents to return after reranking
+        llm=llm        # The LLM to use for reranking
     )
     
     # Setup Qdrant connection
@@ -131,7 +149,8 @@ This is your system prompt.
     # Create query engine
     query_engine = index.as_query_engine(
         llm=llm,
-        similarity_top_k=similarity_top_k
+        similarity_top_k=similarity_top_k,
+        node_postprocessors=[reranker]
     )
     
     return query_engine
